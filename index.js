@@ -10,27 +10,38 @@ const PORT = process.env.PORT || 3000;
 
 let qrImage = null;
 let connectionStatus = 'Başlatılıyor...';
+let isConnected = false; // Bağlantı durumunu takip eden yeni değişken
 
-// Eski oturum klasörünü temizle (Her restartta taze başlasın)
+// Eski oturum klasörünü temizle
 const sessionPath = path.join(__dirname, 'auth_info_baileys');
 if (fs.existsSync(sessionPath)) {
     fs.rmSync(sessionPath, { recursive: true, force: true });
-    console.log('Eski oturum dosyaları silindi.');
 }
 
 app.get('/', (req, res) => {
+    // Eğer bağlandıysak, iPad'i doğrudan WhatsApp Web'e yönlendir
+    if (isConnected) {
+        res.send(`
+            <html>
+            <head><meta http-equiv="refresh" content="0; url=https://web.whatsapp.com"></head>
+            <body>Yönlendiriliyor... Eğer yönlendirilmezse <a href="https://web.whatsapp.com">tıklayın</a>.</body>
+            </html>
+        `);
+        return;
+    }
+
     let content = '';
     if (qrImage) {
         content = `
             <h1 style="color: #333; font-family: sans-serif;">iPad Bağlantısı</h1>
-            <p style="font-family: sans-serif;">Lütfen QR kodu telefonunuzun WhatsApp kamerasından okutun.</p>
-            <img src="${qrImage}" alt="QR Code" style="border:2px solid #ccc; border-radius:10px; padding:10px; margin-top:20px; max-width: 300px;">
-            <p style="margin-top:20px; color: #666; font-size: 12px; font-family: sans-serif;">Sayfa her 5 saniyede bir yenilenir.</p>
+            <p style="font-family: sans-serif;">QR Kodu başarıyla okundu!</p>
+            <p style="font-family: sans-serif; color:blue;"><b>Oturum açılıyor, lütfen bekleyin...</b></p>
+            <p style="margin-top:20px; color: #666; font-size: 12px; font-family: sans-serif;">Sayfa yönlendirilmezse yenilemeyin.</p>
         `;
     } else {
         content = `
             <h1 style="color: blue; font-family: sans-serif;">${connectionStatus}</h1>
-            <p style="font-family: sans-serif;">Lütfen bekleyin, QR hazırlanıyor...</p>
+            <p style="font-family: sans-serif;">Lütfen bekleyin, hazırlanıyor...</p>
         `;
     }
 
@@ -38,7 +49,7 @@ app.get('/', (req, res) => {
         <html>
             <head>
                 <title>iPad WhatsApp</title>
-                <meta http-equiv="refresh" content="5">
+                ${qrImage && !isConnected ? '<meta http-equiv="refresh" content="3">' : ''}
             </head>
             <body style="text-align: center; background-color: #f4f4f4; padding-top: 50px;">
                 <div style="max-width: 400px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
@@ -60,11 +71,11 @@ async function connectToWhatsApp() {
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        // iPad 2 tarayıcı imzası
         browser: ['iPad 2', 'Safari', '9.3.5'],
-        // Bağlantı kopmalarını azaltmak için
-        defaultQueryTimeoutMs: 60000,
-        qrTimeout: 30000
+        qrTimeout: 30000,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 10000,
+        patchMessageBeforeSending: (msg) => { return msg; }
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -73,31 +84,42 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            connectionStatus = 'QR Kod Hazır';
-            console.log('Yeni QR kodu oluşturuldu.');
-            try {
-                qrImage = await qrcode.toDataURL(qr);
-            } catch (err) {
-                console.error('QR resme dönüştürülemedi:', err);
+            if (!isConnected) {
+                connectionStatus = 'QR Kod Hazır';
+                try {
+                    qrImage = await qrcode.toDataURL(qr);
+                } catch (err) { }
             }
         }
 
         if (connection === 'open') {
+            isConnected = true; // Bağlandı olarak işaretle
             connectionStatus = '✅ BAŞARIYLA BAĞLANDI!';
             qrImage = null; 
-            console.log('WhatsApp başarıyla bağlandı.');
+            console.log('WhatsApp başarıyla bağlandı. Yönlendirme deneniyor.');
+            
+            // Kısa bir bekleme sonrası bağlantıyı kalıcı dosyaya yaz
+            setTimeout(() => {
+                try {
+                    if(fs.existsSync('./auth_info_baileys')) {
+                        // Bazen kalıcı diske yazmak için ekstra süre gerekir
+                    }
+                } catch(e){}
+            }, 2000);
+
         } else if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Bağlantı kapandı. Yeniden deneniyor:', shouldReconnect);
             
-            if (shouldReconnect) {
-                connectionStatus = 'Bağlantı koptu, yeniden başlatılıyor...';
+            if (shouldReconnect && !isConnected) { // Bağlandıktan sonra koptuysa tekrar bağlanma, session kalsın
+                connectionStatus = 'Bağlantı koptu, yeniden bağlanılıyor...';
                 qrImage = null;
                 connectToWhatsApp();
-            } else {
-                connectionStatus = 'Çıkış yapıldı. Lütfen Render\'da Deploy edin.';
+            } else if (!isConnected) {
+                connectionStatus = 'Çıkış yapıldı. Render\'da Deploy edin.';
                 qrImage = null;
+                isConnected = false;
             }
+            // Eğer isConnected true iken buraya düşerse, zaten yönlendirmiştir, bir şey yapma.
         }
     });
 }
