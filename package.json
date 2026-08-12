@@ -1,7 +1,7 @@
 {
-  "name": "ipad-2-whatsapp",
+  "name": "ipad2-whatsapp-bridge",
   "version": "1.0.0",
-  "description": "iPad 2 için özel WhatsApp arayüzü",
+  "description": "iPad 2 için WhatsApp köprüsü",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -13,6 +13,7 @@
     "express": "^4.18.2",
     "pino": "^8.17.0",
     "qrcode": "^1.5.3",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "body-parser": "^1.20.2"
   }
 }
