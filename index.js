@@ -4,39 +4,32 @@ const pino = require('pino');
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const bodyParser = require('body-parser');
 const NodeCache = require("node-cache");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Sunucu durumu değişkenleri
+// Middleware
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json());
+
+// Global değişkenler
 let sock = null;
 let connectionStatus = 'Başlatılıyor...';
 let qrImage = null;
 let isConnected = false;
-let messageQueue = []; // Mesaj gönderme kuyruğu
+let latestMessages = []; // Son 30 mesajı tutar (basitlik için)
 
-// Hata önleme için cache
-const msgRetryCounterCache = new NodeCache();
-
-// Oturum klasörü
+// Hata önleme
+const msgRetryCounterCache = new NodeCache({ stdTTL: 600 });
 const sessionPath = path.join(__dirname, 'auth_info_baileys');
 
-// --- EXPRESS SERVER AYARLARI ---
-app.use(express.static(path.join(__dirname, 'public'))); // Statik dosyalar için
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-
-// Public klasörünü oluştur (gerekirse)
-if (!fs.existsSync(path.join(__dirname, 'public'))) {
-    fs.mkdirSync(path.join(__dirname, 'public'));
-}
-
-// --- ANA SAYFA MANTIĞI ---
+// --- SUNUCU ARAYÜZÜ (iPad 2 İçin Basit Web) ---
 app.get('/', (req, res) => {
     if (!isConnected) {
         // Bağlı değilse QR Kod sayfasını göster
-        let qrContent = qrImage ? `<img src="${qrImage}" width="300" height="300">` : `<h3>${connectionStatus}</h3>`;
+        let qrContent = qrImage ? `<img src="${qrImage}" width="300" height="300" style="border:5px solid white; border-radius:10px;">` : `<h3>${connectionStatus}</h3>`;
         res.send(`
             <html>
             <head>
@@ -47,9 +40,9 @@ app.get('/', (req, res) => {
             <body style="font-family: sans-serif; text-align: center; background-color: #f4f4f4; padding-top: 50px;">
                 <div style="max-width: 400px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
                     <h1>iPad 2 Bağlantısı</h1>
-                    <p>Lütfen QR kodu telefonunuzdan okutun.</p>
-                    <div style="margin-top: 20px;">${qrContent}</div>
-                    <p style="color:gray; font-size:12px; margin-top:30px;">Sayfa otomatik yenilenir.</p>
+                    <p>Lütfen QR kodu telefonunuzun WhatsApp kamerasından okutun.</p>
+                    <div style="margin-top: 30px;">${qrContent}</div>
+                    <p style="color:gray; font-size:12px; margin-top:30px;">Sayfa her 5 saniyede bir yenilenir.</p>
                 </div>
             </body>
             </html>
@@ -57,150 +50,96 @@ app.get('/', (req, res) => {
         return;
     }
 
-    // EĞER BAĞLANDIYSA: iPad 2 için Klasik WhatsApp Web Arayüzünü Yükle
-    // Bu arayüzü doğrudan sunucudan oluşturuyoruz.
+    // EĞER BAĞLANDIYSA: Sohbet Arayüzünü Göster (Eski Görünüm)
+    const messageHTML = latestMessages.map(msg => {
+        const sender = msg.fromMe ? 'Sen' : (msg.pushName || msg.remoteJid.split('@')[0]);
+        const content = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '[Medya/Diğer]';
+        const time = new Date(msg.messageTimestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        const bubbleClass = msg.fromMe ? 'sent' : 'received';
+        
+        return `
+            <div class="message ${bubbleClass}">
+                <div class="bubble">
+                    <div class="sender">${sender}</div>
+                    <div class="content">${content}</div>
+                    <div class="time">${time}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
     res.send(`
         <html>
         <head>
             <title>WhatsApp - iPad 2</title>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <meta http-equiv="refresh" content="10"> <!-- Anlık yenileme -->
             <style>
-                body { margin: 0; padding: 0; height: 100vh; overflow: hidden; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; display: flex; flex-direction: column; }
-                #header { background-color: #075e54; color: white; padding: 10px; text-align: center; font-weight: bold; font-size: 18px; }
-                #chat-viewport { flex: 1; display: flex; overflow: hidden; }
-                #sidebar { width: 35%; max-width: 300px; background-color: white; border-right: 1px solid #ddd; display: flex; flex-direction: column; overflow-y: auto; }
-                #main-chat { flex: 1; background-color: #e5ddd5; display: flex; flex-direction: column; overflow-y: auto; padding: 20px; }
-                
-                /* Sohbet Listesi Stili */
-                .chat-item { padding: 15px; border-bottom: 1px solid #f2f2f2; cursor: pointer; display: flex; align-items: center; }
-                .chat-item:hover { background-color: #f5f5f5; }
-                .chat-item.active { background-color: #ebebeb; }
-                .chat-avatar { width: 50px; height: 50px; border-radius: 50%; background-color: #ccc; margin-right: 15px; }
-                .chat-info { flex: 1; overflow: hidden; }
-                .chat-name { font-weight: bold; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-                .chat-preview { color: #777; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-                /* Mesaj Balonları */
-                .message { margin-bottom: 15px; max-width: 70%; clear: both; position: relative; }
-                .message.sent { float: right; }
-                .message.received { float: left; }
-                .bubble { padding: 8px 12px; border-radius: 8px; position: relative; font-size: 14px; }
-                .sent .bubble { background-color: #dcf8c6; }
-                .received .bubble { background-color: white; }
-                .message-meta { font-size: 10px; color: #999; margin-top: 5px; text-align: right; }
-
-                /* Giriş Alanı */
-                #input-area { padding: 10px; background-color: #f0f0f0; border-top: 1px solid #ddd; display: flex; }
-                #msg-input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 16px; -webkit-appearance: none; }
-                #send-btn { padding: 8px 15px; background-color: #075e54; color: white; border: none; border-radius: 5px; margin-left: 10px; font-weight: bold; cursor: pointer; }
-
-                /* Mobil Uyum (iPad 2 Dikey) */
-                @media (max-width: 600px) {
-                    #sidebar { width: 100%; max-width: none; border-right: none; display: ${req.query.chatId ? 'none' : 'flex'}; }
-                    #main-chat { display: ${req.query.chatId ? 'flex' : 'none'}; }
-                }
+                body { font-family: Helvetica, Arial, sans-serif; background-color: #e5ddd5; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
+                #header { background-color: #075e54; color: white; padding: 10px; text-align: center; font-weight: bold; font-size: 16px; position: sticky; top: 0; z-index: 100; }
+                #chat-container { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column-reverse; padding-bottom: 70px;}
+                .message { margin-bottom: 10px; display: flex; max-width: 85%; clear: both; }
+                .message.sent { justify-content: flex-end; float: right; }
+                .message.received { justify-content: flex-start; float: left; }
+                .bubble { padding: 8px 12px; border-radius: 8px; position: relative; font-size: 14px; line-height: 1.4; word-wrap: break-word; }
+                .message.sent .bubble { background-color: #dcf8c6; color: #000; }
+                .message.received .bubble { background-color: #fff; color: #000; }
+                .sender { font-size: 11px; font-weight: bold; color: #333; margin-bottom: 3px; display: ${latestMessages.length > 0 && !latestMessages[0].key.remoteJid.includes('@g.us') ? 'none' : 'block'};}
+                .time { font-size: 10px; color: #888; text-align: right; margin-top: 3px; }
+                #input-form { background-color: #f0f0f0; padding: 10px; display: flex; border-top: 1px solid #ccc; position: fixed; bottom: 0; left: 0; width: 100%; box-sizing: border-box; }
+                #message-input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 16px; -webkit-appearance: none; }
+                #send-btn { padding: 10px 20px; background-color: #075e54; color: white; border: none; border-radius: 5px; margin-left: 10px; font-size: 16px; font-weight: bold; }
+                #status-bar { background-color: ${isConnected ? '#dcf8c6' : '#ffcccb'}; color: ${isConnected ? '#075e54' : 'red'}; padding: 2px; text-align: center; font-size: 10px; }
+                /* Basit grup ismi gizleme */
+                .message.received .bubble .sender {display: block;}
             </style>
         </head>
         <body>
-            <div id="header">WhatsApp - iPad 2 Bridge</div>
-            <div id="chat-viewport">
-                <div id="sidebar">
-                    <!-- Sohbet Listesi Yükleniyor -->
-                    <div style="padding: 20px; text-align:center; color:gray;">Sohbetler Yükleniyor...</div>
-                </div>
-                <div id="main-chat" style="justify-content:center; align-items:center; color:gray;">
-                    ${req.query.chatId ? 'Mesajlar Yükleniyor...' : 'Bir sohbet seçin'}
-                </div>
+            <div id="status-bar">Durum: ${connectionStatus} | Son: ${latestMessages.length > 0 ? (latestMessages[0].pushName || latestMessages[0].remoteJid.split('@')[0]) : 'Yok'}</div>
+            <div id="header">iPad 2 WhatsApp</div>
+            <div id="chat-container">
+                ${messageHTML || '<div style="text-align:center; color:gray; margin-top:50px;">Henüz mesaj yok.<br>Mesaj gelince burada görünecek.</div>'}
             </div>
-            <form id="input-area" style="display: ${req.query.chatId ? 'flex' : 'none'};" action="/send-message" method="POST">
-                <input type="hidden" name="chatId" value="${req.query.chatId}">
-                <input type="text" id="msg-input" name="message" placeholder="Mesaj yaz..." autocomplete="off">
-                <button type="submit" id="send-btn">✈️</button>
+            <form id="input-form" action="/send" method="POST">
+                <input type="hidden" name="remoteJid" value="${latestMessages.length > 0 ? latestMessages[0].key.remoteJid : ''}">
+                <input type="text" id="message-input" name="message" placeholder="Mesaj yaz..." autocomplete="off" required>
+                <button type="submit" id="send-btn">Gönder</button>
             </form>
-
             <script>
-                // --- ARAYÜZ VERİLERİNİ YÜKLE ---
-                // Bu kısım, sunucudan JSON verisi alıp arayüzü günceller (Basitleştirilmiş)
-                
-                fetch('/api/chats').then(r => r.json()).then(chats => {
-                    const sidebar = document.getElementById('sidebar');
-                    sidebar.innerHTML = '';
-                    chats.forEach(chat => {
-                        const div = document.createElement('div');
-                        div.className = 'chat-item ${req.query.chatId === chat.id ? 'active' : ''}';
-                        div.onclick = () => window.location.href = '/?chatId=' + chat.id;
-                        div.innerHTML = \`
-                            <div class="chat-avatar"></div>
-                            <div class="chat-info">
-                                <div class="chat-name">\${chat.name}</div>
-                                <div class="chat-preview">\${chat.lastMessage}</div>
-                            </div>
-                        \`;
-                        sidebar.appendChild(div);
-                    });
+                // Enter tuşu ile gönderme
+                var input = document.getElementById("message-input");
+                input.addEventListener("keyup", function(event) {
+                    if (event.keyCode === 13) { event.preventDefault(); document.getElementById("send-btn").click(); }
                 });
-
-                if("${req.query.chatId}"){
-                    fetch('/api/messages?chatId=${req.query.chatId}').then(r => r.json()).then(data => {
-                        const mainChat = document.getElementById('main-chat');
-                        mainChat.innerHTML = '';
-                        mainChat.style.justifyContent = 'flex-start';
-                        mainChat.style.alignItems = 'stretch';
-
-                        data.messages.forEach(msg => {
-                            const div = document.createElement('div');
-                            div.className = \`message \${msg.fromMe ? 'sent' : 'received'}\`;
-                            div.innerHTML = \`
-                                <div class="bubble">\${msg.content}</div>
-                                <div class="message-meta">\${msg.time}</div>
-                            \`;
-                            mainChat.appendChild(div);
-                        });
-                        // En alta kaydır
-                        mainChat.scrollTop = mainChat.scrollHeight;
-                    });
-                }
+                // Sayfa yüklenince en alta kaydır
+                var container = document.getElementById('chat-container');
+                container.scrollTop = container.scrollHeight;
             </script>
         </body>
         </html>
     `);
 });
 
-// --- API ENDPOİNTLERİ (Arayüz için veri sağlar) ---
-
-// Sohbet Listesi API
-app.get('/api/chats', async (req, res) => {
-    if (!sock) return res.json([]);
-    // Basitlik adına sadece son konuşulanları alıyoruz (baileys store gerekir tam liste için)
-    const chats = [];
-    // ÖRNEK VERİ (Gerçek entegrasyon için store kullanmalı)
-    res.json(chats); 
-});
-
-// Mesajlar API (Seçili sohbetin)
-app.get('/api/messages', async (req, res) => {
-    const { chatId } = req.query;
-    if (!sock || !chatId) return res.json({ messages: [] });
-    
-    // Gerçek uygulamada burada veritabanından mesajlar çekilir.
-    // Şimdilik boş dönüyoruz, arayüzü test etmek için aşağıdaki kısmı doldurabilirsin.
-    res.json({ messages: [] });
-});
-
-// Mesaj Gönderme Endpointi
-app.post('/send-message', async (req, res) => {
-    const { chatId, message } = req.body;
-    if (sock && chatId && message) {
+// --- MESAJ GÖNDERME İŞLEMİ ---
+app.post('/send', async (req, res) => {
+    const { remoteJid, message } = req.body;
+    if (sock && remoteJid && message) {
         try {
-            await sock.sendMessage(chatId, { text: message });
+            await sock.sendMessage(remoteJid, { text: message });
             console.log('Mesaj gönderildi:', message);
-        } catch (error) { console.error(error); }
+        } catch (error) { console.error('Gönderme hatası:', error); }
     }
-    res.redirect('/?chatId=' + chatId);
+    res.redirect('/');
 });
 
-// --- WHATSAPP BAĞLANTI FONKSİYONU ---
+// --- WHATSAPP BAĞLANTISI ---
 async function connectToWhatsApp() {
+    // ÖNEMLİ: Eski oturumu sil ki tertemiz başlasın ve hata vermesin
+    if (fs.existsSync(sessionPath)) {
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+        console.log('Eski oturum silindi, yeniden başlatılıyor.');
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -211,6 +150,8 @@ async function connectToWhatsApp() {
         browser: ['iPad 2', 'Safari', '9.3.5'], // iPad 2 imzası
         msgRetryCounterCache,
         qrTimeout: 60000,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -222,31 +163,49 @@ async function connectToWhatsApp() {
             connectionStatus = 'QR Kod Hazır';
             try {
                 qrImage = await qrcode.toDataURL(qr, { width: 300, margin: 2 });
-            } catch (err) { console.error(err); }
+                console.log('QR Kodu oluşturuldu.');
+            } catch (err) { console.error('QR Hata:', err); }
         }
 
         if (connection === 'open') {
             isConnected = true;
-            connectionStatus = '✅ BAŞARILI!';
+            connectionStatus = '✅ BAĞLI!';
             qrImage = null;
-            console.log('WhatsApp bağlandı.');
+            console.log('WhatsApp başarıyla bağlandı.');
         } else if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Bağlantı kapandı. Yeniden deneniyor:', shouldReconnect);
+            
             if (shouldReconnect) {
-                connectionStatus = 'Bağlantı koptu, yeniden bağlanılıyor...';
-                isConnected = false;
-                setTimeout(connectToWhatsApp, 5000);
-            } else {
-                connectionStatus = 'Çıkış yapıldı. Render\'da Deploy edin.';
+                connectionStatus = 'Bağlantı koptu, yeniden başlatılıyor...';
                 isConnected = false;
                 qrImage = null;
-                // İsteğe bağlı: fs.rmSync(sessionPath, { recursive: true, force: true });
+                setTimeout(connectToWhatsApp, 5000);
+            } else {
+                connectionStatus = 'Oturum kapatıldı. Render\'da Deploy edin.';
+                isConnected = false;
+                qrImage = null;
             }
+        }
+    });
+
+    // --- YENİ MESAJLARI YAKALA ---
+    sock.ev.on('messages.upsert', m => {
+        if (m.type === 'notify') {
+            m.messages.forEach(msg => {
+                if (!msg.key.fromMe && msg.message) {
+                    // Mesajı listeye ekle (en yeniler üste)
+                    latestMessages.unshift(msg);
+                    // Sadece son 30 mesajı tut (cihazı yormamak için)
+                    if (latestMessages.length > 30) latestMessages.pop();
+                }
+            });
+            console.log('Yeni mesaj alındı, listeye eklendi.');
         }
     });
 }
 
+// Sunucuyu başlat
 app.listen(PORT, () => {
     console.log(`Sunucu ${PORT} portunda çalışıyor.`);
     connectToWhatsApp();
