@@ -1,8 +1,9 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const pino = require('pino');
 const qrcode = require('qrcode');
-const NodeCache = require("node-cache");
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,33 +11,36 @@ const PORT = process.env.PORT || 3000;
 let qrImage = null;
 let connectionStatus = 'Başlatılıyor...';
 
-// Mesajlaşma için cache (bağlantı stabilitesi için)
-const msgRetryCounterCache = new NodeCache();
+// Eski oturum klasörünü temizle (Her restartta taze başlasın)
+const sessionPath = path.join(__dirname, 'auth_info_baileys');
+if (fs.existsSync(sessionPath)) {
+    fs.rmSync(sessionPath, { recursive: true, force: true });
+    console.log('Eski oturum dosyaları silindi.');
+}
 
 app.get('/', (req, res) => {
     let content = '';
     if (qrImage) {
         content = `
-            <h1 style="color: #333;">iPad Bağlantısı</h1>
-            <p>Lütfen QR kodu telefonunuzun WhatsApp kamerasından okutun.</p>
-            <img src="${qrImage}" alt="QR Code" style="border:2px solid #ccc; border-radius:10px; padding:10px; margin-top:20px;">
-            <p style="margin-top:20px; color: #666; font-size:14px;">Sayfa her 3 saniyede bir yenilenir.</p>
+            <h1 style="color: #333; font-family: sans-serif;">iPad Bağlantısı</h1>
+            <p style="font-family: sans-serif;">Lütfen QR kodu telefonunuzun WhatsApp kamerasından okutun.</p>
+            <img src="${qrImage}" alt="QR Code" style="border:2px solid #ccc; border-radius:10px; padding:10px; margin-top:20px; max-width: 300px;">
+            <p style="margin-top:20px; color: #666; font-size: 12px; font-family: sans-serif;">Sayfa her 5 saniyede bir yenilenir.</p>
         `;
     } else {
         content = `
-            <h1 style="color: blue;">${connectionStatus}</h1>
-            <p>Lütfen bekleyin...</p>
+            <h1 style="color: blue; font-family: sans-serif;">${connectionStatus}</h1>
+            <p style="font-family: sans-serif;">Lütfen bekleyin, QR hazırlanıyor...</p>
         `;
     }
 
     res.send(`
         <html>
             <head>
-                <title>iPad WhatsApp Bridge</title>
-                <meta http-equiv="refresh" content="3">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>iPad WhatsApp</title>
+                <meta http-equiv="refresh" content="5">
             </head>
-            <body style="font-family: Arial, sans-serif; text-align: center; background-color: #f4f4f4; padding-top: 50px;">
+            <body style="text-align: center; background-color: #f4f4f4; padding-top: 50px;">
                 <div style="max-width: 400px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
                     ${content}
                 </div>
@@ -51,21 +55,16 @@ app.listen(PORT, () => {
 });
 
 async function connectToWhatsApp() {
-    // Oturum bilgilerini 'baileys_auth' klasörüne kaydet (Render silse bile bazen kalıcı diske yazar)
-    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
-    const { version } = await fetchLatestBaileysVersion();
-
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    
     const sock = makeWASocket({
-        version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        // Eski tarayıcı imzası (iPad 2 için)
+        // iPad 2 tarayıcı imzası
         browser: ['iPad 2', 'Safari', '9.3.5'],
-        // Mesaj önbellekleme (bağlantı kopmasını azaltır)
-        msgRetryCounterCache,
-        // Güvenlik uyarısını atla
-        syncFullHistory: false,
-        qrTimeout: 20000 // QR yenileme süresi
+        // Bağlantı kopmalarını azaltmak için
+        defaultQueryTimeoutMs: 60000,
+        qrTimeout: 30000
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -75,29 +74,28 @@ async function connectToWhatsApp() {
 
         if (qr) {
             connectionStatus = 'QR Kod Hazır';
+            console.log('Yeni QR kodu oluşturuldu.');
             try {
-                // QR'ı resim linkine çevir
-                qrImage = await qrcode.toDataURL(qr, { width: 300, margin: 2 });
+                qrImage = await qrcode.toDataURL(qr);
             } catch (err) {
-                console.error('QR oluşturma hatası:', err);
+                console.error('QR resme dönüştürülemedi:', err);
             }
         }
 
         if (connection === 'open') {
             connectionStatus = '✅ BAŞARIYLA BAĞLANDI!';
-            qrImage = null; // Bağlanınca QR'ı kaldır
-            console.log('WhatsApp Bağlantısı Açık!');
+            qrImage = null; 
+            console.log('WhatsApp başarıyla bağlandı.');
         } else if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            console.log('Bağlantı kapandı. Kod:', statusCode);
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Bağlantı kapandı. Yeniden deneniyor:', shouldReconnect);
             
-            // Eğer kullanıcı çıkış yapmadıysa yeniden bağlan
-            if (statusCode !== DisconnectReason.loggedOut) {
-                connectionStatus = 'Bağlantı koptu, yeniden bağlanılıyor...';
+            if (shouldReconnect) {
+                connectionStatus = 'Bağlantı koptu, yeniden başlatılıyor...';
                 qrImage = null;
                 connectToWhatsApp();
             } else {
-                connectionStatus = 'Çıkış yapıldı. Lütfen Render\'da Deploy Latest Commit yapın.';
+                connectionStatus = 'Çıkış yapıldı. Lütfen Render\'da Deploy edin.';
                 qrImage = null;
             }
         }
