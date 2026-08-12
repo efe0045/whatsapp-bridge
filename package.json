@@ -1,7 +1,7 @@
 {
-  "name": "ipad-whatsapp-fix",
+  "name": "ipad-2-whatsapp",
   "version": "1.0.0",
-  "description": "iPad 2 için WhatsApp köprüsü",
+  "description": "iPad 2 için özel WhatsApp arayüzü",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -12,6 +12,7 @@
     "@whiskeysockets/baileys": "^6.7.0",
     "express": "^4.18.2",
     "pino": "^8.17.0",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "node-cache": "^5.1.2"
   }
 }
