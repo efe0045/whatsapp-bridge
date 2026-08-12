@@ -5,15 +5,22 @@ const pino = require('pino');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let qrCodeData = 'Henüz QR kod oluşmadı veya bağlandı.';
+let qrCodeData = 'Henüz QR kod oluşmadı. Lütfen sayfayı yenileyin.';
 
 app.get('/', (req, res) => {
     res.send(`
         <html>
-            <head><title>WhatsApp Bridge</title></head>
+            <head>
+                <title>WhatsApp Bridge</title>
+                <meta http-equiv="refresh" content="5">
+            </head>
             <body style="font-family: Arial; text-align: center; margin-top: 50px;">
                 <h2>iPad WhatsApp Bridge</h2>
-                <p>Durum: ${qrCodeData}</p>
+                <p>Durum:</p>
+                <div style="word-break: break-all; padding: 20px; background: #f0f0f0; margin: 20px auto; width: 80%;">
+                    ${qrCodeData}
+                </div>
+                <p><small>Sayfa her 5 saniyede bir otomatik yenilenir.</small></p>
             </body>
         </html>
     `);
@@ -29,7 +36,6 @@ async function connectToWhatsApp() {
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
         logger: pino({ level: 'silent' })
     });
 
@@ -38,7 +44,7 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) {
-            qrCodeData = `QR Kod: <br><pre>${qr}</pre><br>Lütfen sunucu terminal ekranından (Render Logs) QR kodu taratın.`;
+            qrCodeData = `<b>QR Kod Metni (Bunu bana atabilirsin veya qr kod oluşturucuda kullanabilirsin):</b><br><br>${qr}`;
         }
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -46,16 +52,8 @@ async function connectToWhatsApp() {
                 connectToWhatsApp();
             }
         } else if (connection === 'open') {
-            qrCodeData = 'WhatsApp Başarıyla Bağımlandı!';
+            qrCodeData = '<b>WhatsApp Başarıyla Bağlandı!</b>';
             console.log('WhatsApp bağlantısı başarılı!');
         }
     });
 }
-sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            // QR kodu doğrudan ekrana metin olarak yazdırıyoruz
-            console.log('QR KODUNUZ: ' + qr); 
-            qrCodeData = 'QR Kod aşağıdadır: <br>' + qr;
-        }
-        // ... kodun geri kalanı aynı kalsın ...
