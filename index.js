@@ -51,3 +51,11 @@ async function connectToWhatsApp() {
         }
     });
 }
+sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            // QR kodu doğrudan ekrana metin olarak yazdırıyoruz
+            console.log('QR KODUNUZ: ' + qr); 
+            qrCodeData = 'QR Kod aşağıdadır: <br>' + qr;
+        }
+        // ... kodun geri kalanı aynı kalsın ...
