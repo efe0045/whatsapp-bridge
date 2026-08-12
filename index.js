@@ -1,26 +1,27 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const pino = require('pino');
+const qrcode = require('qrcode'); // QR kütüphanesini ekliyoruz
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let qrCodeData = 'Henüz QR kod oluşmadı. Lütfen sayfayı yenileyin.';
+let qrImage = null; // Değişkeni resim tutacak şekilde ayarladık
 
 app.get('/', (req, res) => {
     res.send(`
         <html>
             <head>
-                <title>WhatsApp Bridge</title>
-                <meta http-equiv="refresh" content="5">
+                <title>iPad WhatsApp Bridge</title>
+                <meta http-equiv="refresh" content="3"> <!-- Sayfayı 3 saniyede bir yenile ki yeni kod gelsin -->
             </head>
-            <body style="font-family: Arial; text-align: center; margin-top: 50px;">
-                <h2>iPad WhatsApp Bridge</h2>
-                <p>Durum:</p>
-                <div style="word-break: break-all; padding: 20px; background: #f0f0f0; margin: 20px auto; width: 80%;">
-                    ${qrCodeData}
+            <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+                <h1>iPad WhatsApp Bağlantısı</h1>
+                <p>Lütfen aşağıdaki QR kodu telefonunuzun WhatsApp kamerasından okutun.</p>
+                <div style="margin-top: 30px;">
+                    ${qrImage ? `<img src="${qrImage}" alt="QR Code" width="300" height="300">` : '<p style="font-size: 20px; color: blue;">QR Kod Bekleniyor... Sayfa yenileniyor.</p>'}
                 </div>
-                <p><small>Sayfa her 5 saniyede bir otomatik yenilenir.</small></p>
+                <p style="margin-top: 20px; color: gray; font-size: 12px;">Sayfa her 3 saniyede bir otomatik güncellenir.</p>
             </body>
         </html>
     `);
@@ -36,24 +37,34 @@ async function connectToWhatsApp() {
     
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' })
+        logger: pino({ level: 'silent' }),
+        // printQRInTerminal: true // Bu satırı sildik, hata veriyordu
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
+
         if (qr) {
-            qrCodeData = `<b>QR Kod Metni (Bunu bana atabilirsin veya qr kod oluşturucuda kullanabilirsin):</b><br><br>${qr}`;
+            // QR geldiğinde, kütüphane ile bunu bir resim linkine (Data URI) çeviriyoruz
+            try {
+                qrImage = await qrcode.toDataURL(qr);
+                console.log('Yeni QR kod oluşturuldu ve ekrana yansıtıldı.');
+            } catch (err) {
+                console.error('QR resim oluşturma hatası:', err);
+            }
         }
+
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Bağlantı kapandı. Yeniden deneniyor:', shouldReconnect);
             if (shouldReconnect) {
                 connectToWhatsApp();
             }
         } else if (connection === 'open') {
-            qrCodeData = '<b>WhatsApp Başarıyla Bağlandı!</b>';
-            console.log('WhatsApp bağlantısı başarılı!');
+            console.log('WhatsApp Başarıyla Bağlandı!');
+            qrImage = null; // Bağlanınca QR'ı kaldır
         }
     });
 }
